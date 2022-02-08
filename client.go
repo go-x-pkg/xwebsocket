@@ -53,7 +53,7 @@ func (wsc *Client) Disconnect() { wsc.cancel() }
 
 // handles all writes operations for websocket connection
 //
-// prefix => log-prefix
+// prefix => log-prefix.
 func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 	pingPeriod, pongWait, writeWait time.Duration) {
 	lastPingAt := time.Now()
@@ -63,6 +63,7 @@ func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 
 	defer func() {
 		wsc.cancel()
+
 		if err := wsc.conn.Close(); err != nil {
 			err = fmt.Errorf("error close websocket connection: %w", err)
 			fnLog(log.Error, "%s | [-] | %s", prefix, err)
@@ -81,6 +82,7 @@ func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 			return err
 		}
 		fnLog(log.Trace, "%s | [<] | pong, ping/pong latency: %s", prefix, time.Since(lastPingAt))
+
 		return nil
 	})
 
@@ -126,7 +128,7 @@ func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 
 // handles all reads operations for websocket connection
 //
-// prefix => log-prefix
+// prefix => log-prefix.
 func (wsc *Client) ReadWorker(fnLog log.FnT, prefix string, cb ReaderCb) {
 	defer func() {
 		wsc.cancel()
@@ -161,6 +163,7 @@ func (wsc *Client) ReadWorker(fnLog log.FnT, prefix string, cb ReaderCb) {
 
 		if t != websocket.TextMessage {
 			fnLog(log.Warn, `%s | [~] | got unsupported websocket message type`, prefix)
+
 			continue
 		}
 
@@ -171,6 +174,7 @@ func (wsc *Client) ReadWorker(fnLog log.FnT, prefix string, cb ReaderCb) {
 			// execute callback
 			if err := cb(t, raw); err != nil {
 				fnLog(log.Error, `%s | [-] | websocket processing message error: "%s"`, prefix, err)
+
 				return
 			}
 		}
