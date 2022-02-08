@@ -12,9 +12,7 @@ import (
 
 type ReaderCb func(t int, raw []byte) error
 
-var (
-	ErrRawMsgChanIsFull = errors.New("raw-msg-chan-is-full")
-)
+var ErrRawMsgChanIsFull = errors.New("raw-msg-chan-is-full")
 
 type Client struct {
 	conn *websocket.Conn
@@ -179,7 +177,7 @@ func (wsc *Client) ReadWorker(fnLog log.FnT, prefix string, cb ReaderCb) {
 	}
 }
 
-func (wsc *Client) OnWSUpgrade(ctx context.Context, conn *websocket.Conn) {
+func (wsc *Client) OnWSUpgrade(ctx context.Context, conn *websocket.Conn, rawMsgChan chan *RawMsg) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -189,5 +187,5 @@ func (wsc *Client) OnWSUpgrade(ctx context.Context, conn *websocket.Conn) {
 	wsc.conn = conn
 
 	//! TODO: configure channel capacity
-	wsc.rawMsgChan = make(chan *RawMsg, 25)
+	wsc.rawMsgChan = rawMsgChan
 }
