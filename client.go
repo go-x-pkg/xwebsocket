@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-x-pkg/log"
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 type ReaderCb func(t int, raw []byte) error
@@ -20,6 +21,8 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	isZapLogger bool
+
 	rawMsgChan chan *RawMsg
 }
 
@@ -29,6 +32,10 @@ func (wsc *Client) RawMsgSend(msg *RawMsg) {
 
 func (wsc *Client) TextMsgSend(text []byte) {
 	wsc.TextMsgSendWithDone(text, nil)
+}
+
+func (wsc *Client) WithZapLogger(isZapLogger bool) {
+	wsc.isZapLogger = isZapLogger
 }
 
 func (wsc *Client) TextMsgSendWithDone(text []byte, done chan error) {
@@ -66,22 +73,40 @@ func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 
 		if err := wsc.conn.Close(); err != nil {
 			err = fmt.Errorf("error close websocket connection: %w", err)
-			fnLog(log.Error, "%s | [-] | %s", prefix, err)
+			if wsc.isZapLogger {
+				fnLog(log.Error, "error close websocket", zap.String("traceId", prefix), zap.Error(err))
+			} else {
+				fnLog(log.Error, "%s | [-] | %s", prefix, err)
+			}
 		}
 	}()
 
-	fnLog(log.Debug, `%s | [+] | start writer. ping-period: %s, pong-wait: %s, write-wait: %s`,
-		prefix, pingPeriod, pongWait, writeWait)
+	if wsc.isZapLogger {
+		fnLog(log.Debug, `%s | [+] | start writer. ping-period: %s, pong-wait: %s, write-wait: %s`,
+			zap.String("traceId", prefix), zap.Duration("ping-period", pingPeriod),
+			zap.Duration("pong-wait", pongWait), zap.Duration("write-wait", writeWait))
+	} else {
+		fnLog(log.Debug, `%s | [+] | start writer. ping-period: %s, pong-wait: %s, write-wait: %s`,
+			prefix, pingPeriod, pongWait, writeWait)
+	}
 
 	defer func() {
-		fnLog(log.Debug, `%s | [-] | stop writer`, prefix)
+		if wsc.isZapLogger {
+			fnLog(log.Debug, "stop writer", zap.String("traceId", prefix))
+		} else {
+			fnLog(log.Debug, `%s | [-] | stop writer`, prefix)
+		}
 	}()
 
 	wsc.conn.SetPongHandler(func(string) error {
 		if err := wsc.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
 			return err
 		}
-		fnLog(log.Trace, "%s | [<] | pong, ping/pong latency: %s", prefix, time.Since(lastPingAt))
+		if wsc.isZapLogger {
+			fnLog(log.Trace, "pong", zap.String("traceId", prefix), zap.Duration("latency", time.Since(lastPingAt)))
+		} else {
+			fnLog(log.Trace, "%s | [<] | pong, ping/pong latency: %s", prefix, time.Since(lastPingAt))
+		}
 
 		return nil
 	})
@@ -90,12 +115,20 @@ func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 		select {
 		case msg := <-wsc.rawMsgChan:
 			if msg.Data != nil {
-				fnLog(log.Trace, `%s | [>] | %s`, prefix, msg.Data)
+				if wsc.isZapLogger {
+					fnLog(log.Trace, "message", zap.String("traceId", prefix), zap.ByteString("data", msg.Data))
+				} else {
+					fnLog(log.Trace, `%s | [>] | %s`, prefix, msg.Data)
+				}
 			}
 
 			err := wsc.conn.WriteMessage(msg.Type, msg.Data)
 			if err != nil {
-				fnLog(log.Error, `%s | [-] | websocket write error: "%s"`, prefix, err)
+				if wsc.isZapLogger {
+					fnLog(log.Error, "websocket write error", zap.String("traceId", prefix), zap.Error(err))
+				} else {
+					fnLog(log.Error, `%s | [-] | websocket write error: "%s"`, prefix, err)
+				}
 			}
 
 			if msg.Done != nil {
@@ -104,13 +137,21 @@ func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 
 		case <-ticker.C:
 			if err := wsc.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				fnLog(log.Error, `%s | %s`, prefix, err)
+				if wsc.isZapLogger {
+					fnLog(log.Error, "error in write deadline", zap.String("traceId", prefix), zap.Error(err))
+				} else {
+					fnLog(log.Error, `%s | %s`, prefix, err)
+				}
 			}
 
 			if err := wsc.conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
 				if err != websocket.ErrCloseSent {
 					err = fmt.Errorf("websocket write ping-message error: %w", err)
-					fnLog(log.Error, `%s | [-] | %s`, prefix, err)
+					if wsc.isZapLogger {
+						fnLog(log.Error, "ping problem", zap.String("traceId", prefix), zap.Error(err))
+					} else {
+						fnLog(log.Error, `%s | [-] | %s`, prefix, err)
+					}
 				}
 
 				return
@@ -118,7 +159,11 @@ func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 
 			lastPingAt = time.Now()
 
-			fnLog(log.Trace, "%s | [>] | ping", prefix)
+			if wsc.isZapLogger {
+				fnLog(log.Trace, "ping", zap.String("traceId", prefix))
+			} else {
+				fnLog(log.Trace, "%s | [>] | ping", prefix)
+			}
 
 		case <-wsc.ctx.Done():
 			return
