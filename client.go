@@ -13,7 +13,7 @@ import (
 
 type ReaderCb func(t int, raw []byte) error
 
-var ErrRawMsgChanIsFull = errors.New("raw-msg-chan-is-full")
+var ErrChanIsFull = errors.New("chan is full")
 
 type Client struct {
 	conn *websocket.Conn
@@ -26,18 +26,17 @@ type Client struct {
 	rawMsgChan chan *RawMsg
 }
 
+// RawMsgSend send RawMsg.
 func (wsc *Client) RawMsgSend(msg *RawMsg) {
 	wsc.rawMsgChan <- msg
 }
 
+// TextMsgSend sends text message.
 func (wsc *Client) TextMsgSend(text []byte) {
 	wsc.TextMsgSendWithDone(text, nil)
 }
 
-func (wsc *Client) WithZapLogger(isZapLogger bool) {
-	wsc.isZapLogger = isZapLogger
-}
-
+// TextMsgSendWithDone sends text message with done send chan.
 func (wsc *Client) TextMsgSendWithDone(text []byte, done chan error) {
 	wsc.rawMsgChan <- &RawMsg{
 		Type: websocket.TextMessage,
@@ -46,112 +45,132 @@ func (wsc *Client) TextMsgSendWithDone(text []byte, done chan error) {
 	}
 }
 
+// RawMsgSendNonBlock sends msg and do not block.
 func (wsc *Client) RawMsgSendNonBlock(msg *RawMsg) {
 	select {
 	case wsc.rawMsgChan <- msg:
 	case <-wsc.ctx.Done():
 	default:
-		msg.Done <- ErrRawMsgChanIsFull
+		select {
+		case msg.Done <- ErrChanIsFull:
+		case <-wsc.ctx.Done():
+		}
 	}
 }
 
-// y would better cancel parent context in order to disconnect
+// Disconnect cancel ctx.
+// y d better cancel parent context in order to disconnect.
 func (wsc *Client) Disconnect() { wsc.cancel() }
 
-// handles all writes operations for websocket connection
-//
-// prefix => log-prefix.
-func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
-	pingPeriod, pongWait, writeWait time.Duration) {
-	lastPingAt := time.Now()
-	ticker := time.NewTicker(pingPeriod)
+// WriteWorker handles all writes operations for websocket connection.
+// Some ws endpoints don't support ping/pong.
+// enablePing == false. pingPeriod, writeTimeout are useless.
+// enablePongHandler == false. readTimeout is useless.
+func (wsc *Client) WriteWorker(fnLog log.FnT, traceID string,
+	// ping
+	enablePing bool,
+	pingPeriod,
+	writeTimeout time.Duration,
 
-	defer ticker.Stop()
+	// pong
+	enablePongHandler bool,
+	readTimeout time.Duration,
+) {
+	lastPingAt := time.Now()
+
+	var chanPing <-chan time.Time
+
+	if enablePing {
+		ticker := time.NewTicker(pingPeriod)
+
+		chanPing = ticker.C
+
+		defer ticker.Stop()
+	}
 
 	defer func() {
 		wsc.cancel()
 
 		if err := wsc.conn.Close(); err != nil {
-			err = fmt.Errorf("error close websocket connection: %w", err)
-			if wsc.isZapLogger {
-				fnLog(log.Error, "error close websocket", zap.String("traceId", prefix), zap.Error(err))
-			} else {
-				fnLog(log.Error, "%s | [-] | %s", prefix, err)
-			}
+			fnLog(log.Error, "error close websocket connection",
+				zap.String("traceId", traceID),
+				zap.Error(err))
 		}
 	}()
 
-	if wsc.isZapLogger {
-		fnLog(log.Debug, `%s | [+] | start writer. ping-period: %s, pong-wait: %s, write-wait: %s`,
-			zap.String("traceId", prefix), zap.Duration("ping-period", pingPeriod),
-			zap.Duration("pong-wait", pongWait), zap.Duration("write-wait", writeWait))
-	} else {
-		fnLog(log.Debug, `%s | [+] | start writer. ping-period: %s, pong-wait: %s, write-wait: %s`,
-			prefix, pingPeriod, pongWait, writeWait)
-	}
+	start := time.Now()
+
+	fnLog(log.Info, "writer start",
+		zap.Bool("enablePing", enablePing),
+		zap.Duration("pingPeriod", pingPeriod),
+		zap.Duration("writeTimeout", writeTimeout),
+
+		zap.Bool("enablePongHandler", enablePongHandler),
+		zap.Duration("readTimeout", readTimeout),
+
+		zap.String("traceId", traceID))
 
 	defer func() {
-		if wsc.isZapLogger {
-			fnLog(log.Debug, "stop writer", zap.String("traceId", prefix))
-		} else {
-			fnLog(log.Debug, `%s | [-] | stop writer`, prefix)
-		}
+		fnLog(log.Info, "writer stop",
+			zap.Duration("uptime", time.Since(start)),
+			zap.String("traceId", traceID))
 	}()
 
-	wsc.conn.SetPongHandler(func(string) error {
-		if err := wsc.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
-			return err
-		}
-		if wsc.isZapLogger {
-			fnLog(log.Trace, "pong", zap.String("traceId", prefix), zap.Duration("latency", time.Since(lastPingAt)))
-		} else {
-			fnLog(log.Trace, "%s | [<] | pong, ping/pong latency: %s", prefix, time.Since(lastPingAt))
-		}
+	if enablePongHandler {
+		wsc.conn.SetPongHandler(func(string) error {
+			if err := wsc.conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+				err := fmt.Errorf("error set read deadline: %w")
 
-		return nil
-	})
+				fnLog(log.Debug, "set read deadline",
+					zap.Duration("latency", time.Since(lastPingAt)),
+					zap.String("traceId", traceID),
+					zap.Error(err))
+
+				return err
+			}
+
+			fnLog(log.Debug, "pong",
+				zap.Duration("latency", time.Since(lastPingAt)),
+				zap.String("traceId", traceID))
+
+			return nil
+		})
+	}
 
 	for {
 		select {
 		case msg := <-wsc.rawMsgChan:
 			if msg.Data != nil {
-				if wsc.isZapLogger {
-					fnLog(log.Trace, "message", zap.String("traceId", prefix), zap.ByteString("data", msg.Data))
-				} else {
-					fnLog(log.Trace, `%s | [>] | %s`, prefix, msg.Data)
-				}
+				fnLog(log.Debug, "message write",
+					zap.ByteString("data", msg.Data),
+					zap.String("traceId", traceID))
 			}
 
 			err := wsc.conn.WriteMessage(msg.Type, msg.Data)
 			if err != nil {
-				if wsc.isZapLogger {
-					fnLog(log.Error, "websocket write error", zap.String("traceId", prefix), zap.Error(err))
-				} else {
-					fnLog(log.Error, `%s | [-] | websocket write error: "%s"`, prefix, err)
-				}
+				fnLog(log.Error, "write error",
+					zap.String("traceId", traceID),
+					zap.Error(err))
 			}
 
 			if msg.Done != nil {
 				msg.Done <- err
 			}
 
-		case <-ticker.C:
-			if err := wsc.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				if wsc.isZapLogger {
-					fnLog(log.Error, "error in write deadline", zap.String("traceId", prefix), zap.Error(err))
-				} else {
-					fnLog(log.Error, `%s | %s`, prefix, err)
-				}
+		case <-chanPing:
+			if err := wsc.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+				fnLog(log.Error, "error set write deadline",
+					zap.Duration("writeTimeout", writeTimeout),
+					zap.String("traceId", traceID),
+					zap.Error(err))
 			}
 
 			if err := wsc.conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
 				if err != websocket.ErrCloseSent {
-					err = fmt.Errorf("websocket write ping-message error: %w", err)
-					if wsc.isZapLogger {
-						fnLog(log.Error, "ping problem", zap.String("traceId", prefix), zap.Error(err))
-					} else {
-						fnLog(log.Error, `%s | [-] | %s`, prefix, err)
-					}
+					err = fmt.Errorf("write ping message error: %w", err)
+					fnLog(log.Error, "ping error",
+						zap.String("traceId", traceID),
+						zap.Error(err))
 				}
 
 				return
@@ -159,11 +178,9 @@ func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 
 			lastPingAt = time.Now()
 
-			if wsc.isZapLogger {
-				fnLog(log.Trace, "ping", zap.String("traceId", prefix))
-			} else {
-				fnLog(log.Trace, "%s | [>] | ping", prefix)
-			}
+			fnLog(log.Debug, "ping",
+				zap.Duration("period", pingPeriod),
+				zap.String("traceId", traceID))
 
 		case <-wsc.ctx.Done():
 			return
@@ -171,10 +188,10 @@ func (wsc *Client) WriteWorker(fnLog log.FnT, prefix string,
 	}
 }
 
-// handles all reads operations for websocket connection
+// ReadWorker handles all reads operations for websocket connection.
 //
 // prefix => log-prefix.
-func (wsc *Client) ReadWorker(fnLog log.FnT, prefix string, cb ReaderCb) {
+func (wsc *Client) ReadWorker(fnLog log.FnT, traceID string, cb ReaderCb) {
 	defer func() {
 		wsc.cancel()
 	}()
@@ -199,7 +216,9 @@ func (wsc *Client) ReadWorker(fnLog log.FnT, prefix string, cb ReaderCb) {
 				case <-wsc.ctx.Done():
 					// websocket read message error: "read tcp ...: use of closed network connection"
 				default:
-					fnLog(log.Error, `%s | [-] | websocket read message error: "%s"`, prefix, err)
+					fnLog(log.Error, "websocket read message error",
+						zap.String("traceId", traceID),
+						zap.Error(err))
 				}
 			}
 
@@ -207,18 +226,23 @@ func (wsc *Client) ReadWorker(fnLog log.FnT, prefix string, cb ReaderCb) {
 		}
 
 		if t != websocket.TextMessage {
-			fnLog(log.Warn, `%s | [~] | got unsupported websocket message type`, prefix)
+			fnLog(log.Warn, "got unsupported websocket message type",
+				zap.String("traceId", traceID))
 
 			continue
 		}
 
 		if cb != nil {
-			fnLog(log.Trace, "%s | [<] | raw-msg-sz: %d, raw-msg: %q",
-				prefix, t, raw)
+			fnLog(log.Debug, "message read",
+				zap.Int("type", t),
+				zap.ByteString("data", raw),
+				zap.String("traceId", traceID))
 
 			// execute callback
 			if err := cb(t, raw); err != nil {
-				fnLog(log.Error, `%s | [-] | websocket processing message error: "%s"`, prefix, err)
+				fnLog(log.Error, "websocket processing message error",
+					zap.String("traceId", traceID),
+					zap.Error(err))
 
 				return
 			}
@@ -226,6 +250,7 @@ func (wsc *Client) ReadWorker(fnLog log.FnT, prefix string, cb ReaderCb) {
 	}
 }
 
+// OnWSUpgrade should be triggered whe websocket upgraded.
 func (wsc *Client) OnWSUpgrade(ctx context.Context, conn *websocket.Conn, rawMsgChan chan *RawMsg) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -235,6 +260,5 @@ func (wsc *Client) OnWSUpgrade(ctx context.Context, conn *websocket.Conn, rawMsg
 
 	wsc.conn = conn
 
-	//! TODO: configure channel capacity
 	wsc.rawMsgChan = rawMsgChan
 }
