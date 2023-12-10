@@ -8,8 +8,6 @@
 
 Websocket client, utils, ping/pong handlers, logging
 
-See [original stackoverflow answer](https://stackoverflow.com/a/49877632).
-
 [godev-image]: https://img.shields.io/badge/go.dev-reference-5272B4?logo=go&logoColor=white
 [godev-url]: https://pkg.go.dev/github.com/go-x-pkg/xwebsocket
 
