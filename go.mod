@@ -4,7 +4,7 @@ go 1.17
 
 require (
 	github.com/go-x-pkg/log v0.0.6
-	github.com/gorilla/websocket v1.5.1
+	github.com/gorilla/websocket v1.5.3
 	go.uber.org/zap v1.26.0
 )
 
